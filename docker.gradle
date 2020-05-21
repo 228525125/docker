@@ -1,0 +1,107 @@
+buildscript {
+    repositories {
+        gradlePluginPortal()
+    }
+    dependencies {
+        classpath 'com.bmuschko:gradle-docker-plugin:6.1.1'
+    }
+}
+
+apply plugin: com.bmuschko.gradle.docker.DockerRemoteApiPlugin
+
+import com.bmuschko.gradle.docker.tasks.image.*
+import com.bmuschko.gradle.docker.tasks.container.*
+
+String dockerFilePath = './build/libs/'
+
+docker {
+	url = 'tcp://127.0.0.1:2375'
+}
+
+ext {
+	imageName = dockerAccount+'/'+name
+	tagName = version
+	jarName = (name + '-' + version).toLowerCase()
+}
+
+task createAppDockerfile(type: Dockerfile) {
+    //onlyIf { !file('Dockerfile').exists() }
+    group 'Docker'
+    description 'Generate docker file for the application'
+    dependsOn bootJar
+    destFile = file(dockerFilePath+'Dockerfile')
+    String dockerProjFolder = projectDir.name
+    from 'openjdk:8-jre-slim'
+    runCommand("mkdir -p /app/springboot/${dockerProjFolder} && mkdir -p /app/springboot/${dockerProjFolder}/conf")
+    addFile("./${jarName}.jar", "/app/springboot/${dockerProjFolder}/")
+    environmentVariable('CATALINA_BASE', "/app/springboot/${dockerProjFolder}")
+    environmentVariable('CATALINA_HOME', "/app/springboot/${dockerProjFolder}")
+    workingDir("/app/springboot/${dockerProjFolder}")
+    if (System.properties.containsKey('debug')) {
+        entryPoint('java', '-Xdebug', '-Xrunjdwp:server=y,transport=dt_socket,address=5005,suspend=n', '-jar', "/app/springboot/${dockerProjFolder}/${jarName}.jar")
+    } else {
+        entryPoint('java', '-jar', '-Xmx64m', '-Xss256k', '-XX:ParallelGCThreads=2', '-Djava.compiler=NONE', "/app/springboot/${dockerProjFolder}/${jarName}.jar")
+    }
+    exposePort(dockerExposePort)
+}
+
+task stopAppContainer(type: DockerStopContainer) {
+	group 'Docker'
+	targetContainerId jarName
+    onError { exception ->
+        // Ignore exception if container does not exist otherwise throw it
+        //if (!exception.message.contains('No such container'))
+        //    throw exception
+    }
+}
+
+task removeAppContainer(type: DockerRemoveContainer) {
+	group 'Docker' 
+	dependsOn stopAppContainer
+	targetContainerId jarName
+	onError { exception ->
+        // Ignore exception if container does not exist otherwise throw it
+        //if (!exception.message.contains('No such container'))
+        //    throw exception
+    }
+}
+
+task removeAppImage(type: DockerRemoveImage) {
+    group 'Docker'
+    description 'Remove the docker image using force'
+    dependsOn removeAppContainer
+    force = true
+    targetImageId imageName+':'+tagName
+    onError { exception ->
+        if (exception.message.contains('No such image')) {
+            println 'Docker image not found for the current project'
+        }
+    }
+}
+
+task createAppImage(type: DockerBuildImage) {
+    group 'Docker'
+    description 'Executes bootRepackage, generates a docker file and builds image from it'
+    dependsOn(createAppDockerfile, removeAppImage)
+    dockerFile = createAppDockerfile.destFile    
+    inputDir = file(dockerFilePath)
+    images.add(imageName+':'+tagName)
+}
+
+task createAppContainer(type: DockerCreateContainer) {
+	group 'Docker'
+    dependsOn createAppImage
+    targetImageId createAppImage.getImageId()
+    containerName = jarName
+    ipv4Address = dockerIPAddress
+    hostConfig.portBindings = [dockerExposePort+':'+dockerExposePort]
+    hostConfig.network = dockerNetwork
+    hostConfig.links = ['mysql-8:mysql_8']
+    hostConfig.autoRemove = true         //容器停止后会自动删除
+}
+
+task startAppContainer(type: DockerStartContainer) {
+	group 'Docker'
+    dependsOn createAppContainer
+    targetContainerId createAppContainer.getContainerId()
+}
